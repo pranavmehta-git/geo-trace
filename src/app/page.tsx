@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import Calendar from '@/components/Calendar';
+import LocationPaste from '@/components/LocationPaste';
 import FileUpload from '@/components/FileUpload';
 import JurisdictionSummary from '@/components/JurisdictionSummary';
 import DayDetail from '@/components/DayDetail';
@@ -17,6 +18,7 @@ export default function Home() {
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const [availableYears, setAvailableYears] = useState<number[]>([]);
   const [showUpload, setShowUpload] = useState(true);
+  const [showPhotoUpload, setShowPhotoUpload] = useState(false);
   const [showExifTool, setShowExifTool] = useState(false);
 
   const loadTimeline = useCallback(async () => {
@@ -45,6 +47,13 @@ export default function Home() {
     ? [...new Set([...availableYears, currentYear])].sort((a, b) => b - a)
     : [currentYear, currentYear - 1, currentYear - 2, currentYear - 3];
 
+  const handleImportComplete = (entries: TimelineEntry[]) => {
+    setTimeline(entries);
+    setShowUpload(false);
+    setShowPhotoUpload(false);
+    getAvailableYears().then(setAvailableYears);
+  };
+
   return (
     <div className="min-h-screen bg-gray-950">
       {/* Header */}
@@ -67,7 +76,7 @@ export default function Home() {
               ))}
             </select>
             <button
-              onClick={() => { setShowUpload(!showUpload); setShowExifTool(false); }}
+              onClick={() => { setShowUpload(!showUpload); setShowPhotoUpload(false); setShowExifTool(false); }}
               className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
                 showUpload ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-300 hover:bg-gray-700 border border-gray-700'
               }`}
@@ -81,30 +90,46 @@ export default function Home() {
       <main className="max-w-7xl mx-auto px-4 py-6">
         {/* Privacy banner */}
         <div className="bg-green-900/20 border border-green-800/50 rounded-xl px-4 py-3 mb-6 text-sm text-green-300">
-          <strong>Your data stays on your device.</strong> ResiDues never receives your photos. EXIF data is processed
-          entirely in your browser. GPS coordinates are converted to jurisdiction names and immediately discarded.
+          <strong>Your data stays on your device.</strong> ResiDues processes everything
+          entirely in your browser. Location coordinates are converted to jurisdiction names and immediately discarded.
         </div>
 
-        {/* Upload section */}
+        {/* Import section */}
         {showUpload && (
           <div className="mb-6 space-y-4">
-            <FileUpload
+            {/* Primary: Google Takeout paste */}
+            <LocationPaste
               year={year}
-              onImportComplete={(entries) => {
-                setTimeline(entries);
-                setShowUpload(false);
-                getAvailableYears().then(setAvailableYears);
-              }}
+              onImportComplete={handleImportComplete}
             />
-            <div className="flex justify-center">
+
+            {/* Secondary: Photo upload (collapsed by default) */}
+            <div className="border-t border-gray-800 pt-4">
               <button
-                onClick={() => setShowExifTool(!showExifTool)}
+                onClick={() => { setShowPhotoUpload(!showPhotoUpload); setShowExifTool(false); }}
                 className="text-sm text-gray-500 hover:text-gray-300 transition-colors"
               >
-                {showExifTool ? 'Hide' : 'Show'} ExifTool instructions (power users)
+                {showPhotoUpload ? 'Hide' : 'Or import from'} photos instead
               </button>
+
+              {showPhotoUpload && (
+                <div className="mt-4 space-y-4">
+                  <FileUpload
+                    year={year}
+                    onImportComplete={handleImportComplete}
+                  />
+                  <div className="flex justify-center">
+                    <button
+                      onClick={() => setShowExifTool(!showExifTool)}
+                      className="text-sm text-gray-500 hover:text-gray-300 transition-colors"
+                    >
+                      {showExifTool ? 'Hide' : 'Show'} ExifTool instructions (power users)
+                    </button>
+                  </div>
+                  {showExifTool && <ExifToolHelper />}
+                </div>
+              )}
             </div>
-            {showExifTool && <ExifToolHelper />}
           </div>
         )}
 
@@ -145,7 +170,7 @@ export default function Home() {
               {/* Disclaimer */}
               <p className="text-xs text-gray-600 px-1">
                 ResiDues is a reconstruction aid, not a legal or tax compliance tool. Inferred jurisdictions are based
-                on photo metadata and may be inaccurate. Verify all dates independently before submitting to tax
+                on location metadata and may be inaccurate. Verify all dates independently before submitting to tax
                 authorities, immigration agencies, or employers.
               </p>
             </div>

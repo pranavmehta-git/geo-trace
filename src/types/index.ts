@@ -6,7 +6,7 @@ export interface PhotoRecord {
 
 export interface Evidence {
   timestamp: Date;
-  source: 'photo' | 'csv' | 'manual';
+  source: 'photo' | 'csv' | 'manual' | 'takeout';
   note?: string;
 }
 
@@ -32,7 +32,7 @@ export interface DayOverride {
 export interface ImportSession {
   id: string;
   timestamp: Date;
-  source: 'photo-upload' | 'csv-import';
+  source: 'photo-upload' | 'csv-import' | 'takeout-import';
   recordCount: number;
 }
 
