@@ -1,19 +1,25 @@
 import type { PhotoRecord } from '@/types';
 
 /**
- * Parse Google Takeout Location History data.
+ * Parse Google Takeout data (Location History or Photos sidecar JSONs).
  *
- * Supports two formats:
+ * Supports:
  * 1. Records.json — raw location points with E7 coordinates
  * 2. Semantic Location History — monthly JSONs with placeVisit/activitySegment
- *
- * Also handles the newer (2024+) format where the top-level key may differ.
+ * 3. Newer (2024+) semanticSegments format
+ * 4. Google Photos sidecar JSONs — per-photo metadata with geoData + photoTakenTime
+ * 5. Array of any of the above (merged sidecar files)
  */
 export function parseTakeoutJSON(text: string): PhotoRecord[] {
   let data: unknown;
   try {
     data = JSON.parse(text);
   } catch {
+    // Try to recover concatenated JSON objects (multiple sidecars pasted together)
+    const recovered = recoverConcatenatedJSON(text);
+    if (recovered.length > 0) {
+      return parsePhotoSidecars(recovered);
+    }
     throw new Error('Invalid JSON. Make sure you copied the entire file contents.');
   }
 
@@ -21,41 +27,167 @@ export function parseTakeoutJSON(text: string): PhotoRecord[] {
     throw new Error('Unexpected format. Expected a JSON object.');
   }
 
+  // Array — could be merged sidecar files, location records, or semantic objects
+  if (Array.isArray(data)) {
+    const arr = data as Record<string, unknown>[];
+    if (arr.length === 0) {
+      throw new Error('Empty array. No data to process.');
+    }
+
+    // Detect type from first non-empty element
+    const sample = arr.find(x => x && typeof x === 'object') as Record<string, unknown> | undefined;
+    if (!sample) {
+      throw new Error('No valid objects found in array.');
+    }
+
+    if ('latitudeE7' in sample) {
+      return parseRecordsJSON(arr);
+    }
+    if ('placeVisit' in sample || 'activitySegment' in sample) {
+      return parseSemanticJSON(arr);
+    }
+    // Google Photos sidecar array (has photoTakenTime or geoData)
+    if ('photoTakenTime' in sample || 'geoData' in sample || 'geoDataExif' in sample) {
+      return parsePhotoSidecars(arr);
+    }
+  }
+
   const obj = data as Record<string, unknown>;
 
-  // Format 1: Records.json — { "locations": [...] }
+  // Single Google Photos sidecar JSON
+  if ('photoTakenTime' in obj || ('geoData' in obj && 'title' in obj)) {
+    return parsePhotoSidecars([obj]);
+  }
+
+  // Records.json — { "locations": [...] }
   if (Array.isArray(obj.locations)) {
     return parseRecordsJSON(obj.locations);
   }
 
-  // Format 2: Semantic Location History — { "timelineObjects": [...] }
+  // Semantic Location History — { "timelineObjects": [...] }
   if (Array.isArray(obj.timelineObjects)) {
     return parseSemanticJSON(obj.timelineObjects);
   }
 
-  // Format 3: Newer Semantic format — { "semanticSegments": [...] }
+  // Newer Semantic format — { "semanticSegments": [...] }
   if (Array.isArray(obj.semanticSegments)) {
     return parseSemanticSegments(obj.semanticSegments);
   }
 
-  // Format 4: Array of timeline objects directly (some exports)
-  if (Array.isArray(data)) {
-    // Could be an array of location records or semantic objects
-    const arr = data as Record<string, unknown>[];
-    if (arr.length > 0) {
-      if ('latitudeE7' in arr[0]) {
-        return parseRecordsJSON(arr);
+  throw new Error(
+    'Unrecognized format. Supported: Google Photos Takeout JSON sidecars, ' +
+    'Location History Records.json, or Semantic Location History.'
+  );
+}
+
+/**
+ * Parse multiple Google Photos sidecar JSON files read from a folder.
+ * Each file's text content is parsed individually.
+ */
+export function parsePhotoSidecarFiles(fileTexts: string[]): PhotoRecord[] {
+  const allObjects: Record<string, unknown>[] = [];
+
+  for (const text of fileTexts) {
+    try {
+      const data = JSON.parse(text);
+      if (data && typeof data === 'object' && !Array.isArray(data)) {
+        allObjects.push(data as Record<string, unknown>);
       }
-      if ('placeVisit' in arr[0] || 'activitySegment' in arr[0]) {
-        return parseSemanticJSON(arr);
+    } catch {
+      // Skip unparseable files (metadata.json, etc.)
+      continue;
+    }
+  }
+
+  return parsePhotoSidecars(allObjects);
+}
+
+/**
+ * Parse Google Photos sidecar JSON objects.
+ *
+ * Each sidecar has:
+ *   photoTakenTime.timestamp (string, unix seconds)
+ *   geoData.latitude / geoData.longitude (floats, 0.0 if missing)
+ *   geoDataExif.latitude / geoDataExif.longitude (fallback)
+ */
+function parsePhotoSidecars(objects: Record<string, unknown>[]): PhotoRecord[] {
+  const records: PhotoRecord[] = [];
+
+  for (const obj of objects) {
+    // Get timestamp — prefer photoTakenTime over creationTime
+    const photoTime = obj.photoTakenTime as Record<string, unknown> | undefined;
+    const creationTime = obj.creationTime as Record<string, unknown> | undefined;
+    const timeObj = photoTime || creationTime;
+
+    if (!timeObj) continue;
+
+    const tsStr = timeObj.timestamp as string | undefined;
+    if (!tsStr) continue;
+
+    const tsSec = parseInt(tsStr, 10);
+    if (isNaN(tsSec)) continue;
+
+    const timestamp = new Date(tsSec * 1000);
+    if (isNaN(timestamp.getTime())) continue;
+
+    // Get GPS — prefer geoData (user-corrected) over geoDataExif (raw EXIF)
+    const geoData = obj.geoData as Record<string, unknown> | undefined;
+    const geoDataExif = obj.geoDataExif as Record<string, unknown> | undefined;
+
+    let lat = 0;
+    let lng = 0;
+
+    if (geoData) {
+      lat = geoData.latitude as number || 0;
+      lng = geoData.longitude as number || 0;
+    }
+
+    // Fall back to EXIF geo if primary is zeroed
+    if (lat === 0 && lng === 0 && geoDataExif) {
+      lat = geoDataExif.latitude as number || 0;
+      lng = geoDataExif.longitude as number || 0;
+    }
+
+    // Skip photos with no GPS
+    if (lat === 0 && lng === 0) continue;
+    if (lat < -90 || lat > 90 || lng < -180 || lng > 180) continue;
+
+    records.push({ timestamp, lat, lng });
+  }
+
+  return records;
+}
+
+/**
+ * Try to recover concatenated JSON objects (e.g., user pasted multiple
+ * sidecar files back to back without wrapping in an array).
+ */
+function recoverConcatenatedJSON(text: string): Record<string, unknown>[] {
+  const results: Record<string, unknown>[] = [];
+  let depth = 0;
+  let start = -1;
+
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '{') {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (text[i] === '}') {
+      depth--;
+      if (depth === 0 && start >= 0) {
+        try {
+          const obj = JSON.parse(text.substring(start, i + 1));
+          if (obj && typeof obj === 'object') {
+            results.push(obj as Record<string, unknown>);
+          }
+        } catch {
+          // skip malformed chunk
+        }
+        start = -1;
       }
     }
   }
 
-  throw new Error(
-    'Unrecognized format. Expected Google Takeout Location History ' +
-    '(Records.json or Semantic Location History).'
-  );
+  return results;
 }
 
 /**
